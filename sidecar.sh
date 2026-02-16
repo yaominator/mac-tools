@@ -5,34 +5,57 @@
 #
 # 使用方法:
 #   chmod +x sidecar.sh
-#   ./sidecar.sh              # 使用脚本中默认的设备名
-#   ./sidecar.sh "My iPad"    # 指定 iPad 名称
+#   ./sidecar.sh                    # 使用默认设备名连接/断开
+#   ./sidecar.sh "My iPad"          # 指定 iPad 名称
+#   ./sidecar.sh debug              # 调试模式 - 打印屏幕镜像面板的 UI 元素
+#   ./sidecar.sh debug "My iPad"    # 调试模式 + 指定设备名
 #
 # 前提条件:
 #   1. 在 系统设置 > 隐私与安全性 > 辅助功能 中授权 Terminal.app
 #   2. iPad 与 Mac 登录同一 Apple ID，且在附近/同一 WiFi
 #   3. 将下方 DEFAULT_DEVICE_NAME 改为你 iPad 的名称
-#      (iPad 上查看: 设置 > 通用 > 关于本机 > 名称)
 #
-# 工作原理:
-#   通过 macOS Accessibility API 操作 Control Center 的屏幕镜像模块，
-#   找到 iPad 设备并切换 Sidecar 连接。再次运行即可断开连接。
-#
-# 兼容性: macOS Sequoia (15.2+) / Tahoe
+# 兼容性: macOS Sequoia (15.2+) / Tahoe (中英文系统均支持)
 # =============================================================================
 
 DEFAULT_DEVICE_NAME="13太保"  # <-- 改成你的 iPad 名称
 
-DEVICE_NAME="${1:-$DEFAULT_DEVICE_NAME}"
+DEBUG_MODE="false"
+DEVICE_NAME=""
 
+# 解析参数
+for arg in "$@"; do
+    if [ "$arg" = "debug" ]; then
+        DEBUG_MODE="true"
+    else
+        DEVICE_NAME="$arg"
+    fi
+done
+
+DEVICE_NAME="${DEVICE_NAME:-$DEFAULT_DEVICE_NAME}"
+
+if [ "$DEBUG_MODE" = "true" ]; then
+    echo "[调试模式] 将打印屏幕镜像面板的 UI 元素树"
+fi
 echo "正在切换 Sidecar 连接: $DEVICE_NAME ..."
 
-osascript -l JavaScript <<EOF
+osascript -l JavaScript <<ENDSCRIPT
 ObjC.import('Cocoa');
 ObjC.bindFunction('AXUIElementPerformAction', ['int', ['id', 'id']]);
 ObjC.bindFunction('AXUIElementCreateApplication', ['id', ['unsigned int']]);
 ObjC.bindFunction('AXUIElementCopyAttributeValue', ['int', ['id', 'id', 'id*']]);
 ObjC.bindFunction('AXUIElementCopyAttributeNames', ['int', ['id', 'id*']]);
+ObjC.bindFunction('AXUIElementCopyActionNames', ['int', ['id', 'id*']]);
+
+const DEBUG = $DEBUG_MODE;
+
+function log(msg) {
+    console.log(msg);
+}
+
+function debug(msg) {
+    if (DEBUG) console.log('[DEBUG] ' + msg);
+}
 
 function run(_) {
     const TARGET_DEVICE_NAME = '$DEVICE_NAME';
@@ -40,7 +63,6 @@ function run(_) {
     const \$windows = Ref();
     const \$children = Ref();
 
-    // 获取 Control Center 的进程 ID
     const pid = $.NSRunningApplication
         .runningApplicationsWithBundleIdentifier('com.apple.controlcenter')
         .firstObject.processIdentifier;
@@ -51,55 +73,68 @@ function run(_) {
     $.AXUIElementCopyAttributeValue(app, 'AXChildren', \$children);
     $.AXUIElementCopyAttributeValue(\$children[0].js[0], 'AXChildren', \$children);
 
-    // 找到 Control Center 菜单栏按钮
     const ccExtra = \$children[0].js.find((child) => {
         $.AXUIElementCopyAttributeValue(child, 'AXIdentifier', \$attr);
         return \$attr[0].js == 'com.apple.menuextra.controlcenter';
     });
 
     if (!ccExtra) {
-        console.log('错误: 找不到 Control Center 菜单栏项');
+        log('错误: 找不到 Control Center 菜单栏项');
         return 1;
     }
 
-    // 打开 Control Center 窗口
+    // 检查 Control Center 是否已经打开
+    $.AXUIElementCopyAttributeValue(app, 'AXWindows', \$windows);
+    const alreadyOpen = typeof \$windows[0] == 'function' && (\$windows[0].js.length ?? 0) > 0;
+
+    if (alreadyOpen) {
+        debug('Control Center 已经打开，先关闭再重新打开');
+        $.AXUIElementPerformAction(ccExtra, 'AXPress');
+        delay(0.5);
+    }
+
+    // 打开 Control Center
     $.AXUIElementPerformAction(ccExtra, 'AXPress');
 
-    // 等待窗口绘制完成
     if (!waitFor(() => {
         $.AXUIElementCopyAttributeValue(app, 'AXWindows', \$windows);
         return typeof \$windows[0] == 'function' && (\$windows[0].js.length ?? 0) > 0;
-    }, 2000)) {
-        console.log('错误: Control Center 窗口打开超时');
-        return 1;
+    }, 3000)) {
+        debug('首次等待超时，可能点击关闭了已打开的窗口，再试一次');
+        // 可能第一次点击关闭了已打开的 CC，再点一次打开
+        $.AXUIElementPerformAction(ccExtra, 'AXPress');
+
+        if (!waitFor(() => {
+            $.AXUIElementCopyAttributeValue(app, 'AXWindows', \$windows);
+            return typeof \$windows[0] == 'function' && (\$windows[0].js.length ?? 0) > 0;
+        }, 3000)) {
+            log('错误: Control Center 窗口打开超时');
+            return 1;
+        }
     }
 
-    // 获取 Control Center 窗口的子元素
     $.AXUIElementCopyAttributeValue(\$windows[0].js[0], 'AXChildren', \$children);
 
-    // 找到模块组 (AXGroup)
     const modulesGroup = \$children[0].js.find((child) => {
         $.AXUIElementCopyAttributeValue(child, 'AXRole', \$attr);
         return \$attr[0].js == 'AXGroup';
     });
 
     if (!modulesGroup) {
-        console.log('错误: 找不到 Control Center 模块组');
+        log('错误: 找不到 Control Center 模块组');
         dismissControlCenter();
         return 1;
     }
 
-    // 获取模块组中的各个模块
     $.AXUIElementCopyAttributeValue(modulesGroup, 'AXChildren', \$children);
 
-    // 找到屏幕镜像模块
     const screenMirroring = \$children[0].js.find((child) => {
         $.AXUIElementCopyAttributeValue(child, 'AXIdentifier', \$attr);
         return \$attr[0].js == 'controlcenter-screen-mirroring';
     });
 
     if (!screenMirroring) {
-        console.log('错误: 找不到屏幕镜像模块，请确认 Control Center 中有"屏幕镜像"选项');
+        log('错误: 找不到屏幕镜像模块');
         dismissControlCenter();
         return 1;
     }
@@ -107,78 +142,127 @@ function run(_) {
     // 展开屏幕镜像面板
     $.AXUIElementPerformAction(
         screenMirroring,
-        'Name:show details\nTarget:0x0\nSelector:(null)'
+        'Name:show details\\nTarget:0x0\\nSelector:(null)'
     );
 
-    // 等待面板展开
     if (!waitFor(() => {
         $.AXUIElementCopyAttributeValue(modulesGroup, 'AXChildren', \$children);
         return typeof \$children[0] == 'function' && (\$children[0].js.length ?? 0) > 0;
     }, 2000)) {
-        console.log('错误: 屏幕镜像面板展开超时');
+        log('错误: 屏幕镜像面板展开超时');
         dismissControlCenter();
         return 1;
     }
 
-    // 获取包含设备列表的滚动区域
-    const mirroringOptions = \$children[0].js.find((child) => {
+    // 等待 UI 稳定
+    delay(0.5);
+
+    // 获取滚动区域
+    $.AXUIElementCopyAttributeValue(modulesGroup, 'AXChildren', \$children);
+    const scrollArea = \$children[0].js.find((child) => {
         $.AXUIElementCopyAttributeValue(child, 'AXRole', \$attr);
         return \$attr[0].js == 'AXScrollArea';
     });
 
-    if (!mirroringOptions) {
-        console.log('错误: 找不到设备列表区域');
+    if (!scrollArea) {
+        log('错误: 找不到设备列表区域');
         dismissControlCenter();
         return 1;
     }
 
-    // 获取设备列表
-    $.AXUIElementCopyAttributeValue(mirroringOptions, 'AXChildren', \$children);
+    // 获取滚动区域的所有子元素
+    $.AXUIElementCopyAttributeValue(scrollArea, 'AXChildren', \$children);
 
-    // 检查是否已连接 (查找 "Use As Extended Display" 或 "用作扩展显示器")
-    const isConnected = checkConnected(\$children, \$attr);
+    if (DEBUG) {
+        dumpElements(\$children[0].js, 0);
+    }
 
-    if (isConnected) {
-        // 已连接状态 - 寻找返回按钮来断开
-        const backButton = \$children[0].js.find((child) => {
-            $.AXUIElementCopyAttributeValue(child, 'AXRole', \$attr);
-            return \$attr[0].js === 'AXDisclosureTriangle';
-        });
+    // =========================================================
+    // 策略 1: 直接在当前视图查找设备
+    // =========================================================
+    let toggle = findDeviceByName(\$children[0].js, TARGET_DEVICE_NAME);
 
-        if (backButton) {
-            $.AXUIElementPerformAction(backButton, 'AXPress');
-            delay(0.5);
-            $.AXUIElementCopyAttributeValue(mirroringOptions, 'AXChildren', \$children);
+    if (toggle) {
+        debug('策略1成功: 直接找到设备');
+        $.AXUIElementPerformAction(toggle, 'AXPress');
+        delay(0.3);
+        dismissControlCenter();
+        log('已切换 Sidecar: ' + TARGET_DEVICE_NAME);
+        return 0;
+    }
+
+    debug('策略1: 当前视图未直接找到设备，可能在详情页');
+
+    // =========================================================
+    // 策略 2: 当前视图可能是已连接设备的详情页
+    //         尝试找到返回按钮，回到设备列表，再查找设备
+    // =========================================================
+    let backButton = findBackButton(\$children[0].js);
+
+    if (backButton) {
+        debug('策略2: 找到返回按钮，点击返回');
+        $.AXUIElementPerformAction(backButton, 'AXPress');
+        delay(0.8);
+
+        // 重新获取滚动区域内容
+        $.AXUIElementCopyAttributeValue(scrollArea, 'AXChildren', \$children);
+
+        if (DEBUG) {
+            log('[DEBUG] --- 返回后的 UI 元素 ---');
+            dumpElements(\$children[0].js, 0);
+        }
+
+        toggle = findDeviceByName(\$children[0].js, TARGET_DEVICE_NAME);
+        if (toggle) {
+            debug('策略2成功: 返回后找到设备');
+            $.AXUIElementPerformAction(toggle, 'AXPress');
+            delay(0.3);
+            dismissControlCenter();
+            log('已断开 Sidecar: ' + TARGET_DEVICE_NAME);
+            return 0;
         }
     }
 
-    // 在设备列表中找到目标 iPad
-    let toggle = findDeviceToggle(\$children, \$attr, TARGET_DEVICE_NAME);
+    debug('策略2: 未找到返回按钮或返回后仍未找到设备');
 
-    if (!toggle) {
-        console.log('错误: 找不到设备 "' + TARGET_DEVICE_NAME + '"');
-        console.log('请确认:');
-        console.log('  1. iPad 名称拼写正确（区分大小写）');
-        console.log('  2. iPad 在附近且已开启');
-        console.log('  3. iPad 与 Mac 登录同一 Apple ID');
+    // =========================================================
+    // 策略 3: 在嵌套的 AXGroup 中深度查找设备
+    // =========================================================
+    $.AXUIElementCopyAttributeValue(scrollArea, 'AXChildren', \$children);
+    toggle = deepFindDevice(\$children[0].js, TARGET_DEVICE_NAME, 3);
+
+    if (toggle) {
+        debug('策略3成功: 深度搜索找到设备');
+        $.AXUIElementPerformAction(toggle, 'AXPress');
+        delay(0.3);
         dismissControlCenter();
-        return 1;
+        log('已切换 Sidecar: ' + TARGET_DEVICE_NAME);
+        return 0;
     }
 
-    // 点击设备切换按钮
-    $.AXUIElementPerformAction(toggle, 'AXPress');
+    // =========================================================
+    // 策略 4: 如果处于已连接详情页，尝试直接点击设备名对应的元素
+    //         （可能是 AXStaticText 或带 AXValue 的元素）
+    // =========================================================
+    $.AXUIElementCopyAttributeValue(scrollArea, 'AXChildren', \$children);
+    toggle = findDeviceByAnyAttribute(\$children[0].js, TARGET_DEVICE_NAME);
 
-    // 关闭 Control Center
-    delay(0.3);
+    if (toggle) {
+        debug('策略4成功: 通过属性搜索找到设备');
+        $.AXUIElementPerformAction(toggle, 'AXPress');
+        delay(0.3);
+        dismissControlCenter();
+        log('已切换 Sidecar: ' + TARGET_DEVICE_NAME);
+        return 0;
+    }
+
+    log('错误: 所有策略均未找到设备 "' + TARGET_DEVICE_NAME + '"');
+    log('提示: 请运行 ./sidecar.sh debug 查看 UI 元素来排查问题');
     dismissControlCenter();
-
-    if (isConnected) {
-        console.log('已断开 Sidecar: ' + TARGET_DEVICE_NAME);
-    } else {
-        console.log('已连接 Sidecar: ' + TARGET_DEVICE_NAME);
-    }
-    return 0;
+    return 1;
 }
+
+// ============ 工具函数 ============
 
 function waitFor(condition, timeoutMs) {
     const timeout = new Date().getTime() + timeoutMs;
@@ -190,73 +274,200 @@ function waitFor(condition, timeoutMs) {
 }
 
 function dismissControlCenter() {
+    // 发送 Escape 键关闭 Control Center (key down + key up)
     $.CGEventPost($.kCGHIDEventTap, $.CGEventCreateKeyboardEvent(null, 53, true));
-    delay(0.1);
+    $.CGEventPost($.kCGHIDEventTap, $.CGEventCreateKeyboardEvent(null, 53, false));
+    delay(0.3);
     $.CGEventPost($.kCGHIDEventTap, $.CGEventCreateKeyboardEvent(null, 53, true));
+    $.CGEventPost($.kCGHIDEventTap, $.CGEventCreateKeyboardEvent(null, 53, false));
+    delay(0.3);
+    // 第三次确保完全关闭（屏幕镜像子面板 + CC 主面板）
+    $.CGEventPost($.kCGHIDEventTap, $.CGEventCreateKeyboardEvent(null, 53, true));
+    $.CGEventPost($.kCGHIDEventTap, $.CGEventCreateKeyboardEvent(null, 53, false));
 }
 
-function checkConnected(\$children, \$attr) {
-    return \$children[0].js.some((child) => {
-        $.AXUIElementCopyAttributeValue(child, 'AXRole', \$attr);
+function getAttr(element, attrName) {
+    const \$val = Ref();
+    const result = $.AXUIElementCopyAttributeValue(element, attrName, \$val);
+    if (result !== 0) return null;
+    try {
+        return \$val[0].js;
+    } catch (e) {
+        return null;
+    }
+}
 
-        // macOS 15.3+ 可能将选项嵌套在 AXGroup 中
-        if (\$attr[0].js === 'AXGroup') {
-            const \$groupChildren = Ref();
-            $.AXUIElementCopyAttributeValue(child, 'AXChildren', \$groupChildren);
-            if (typeof \$groupChildren[0] !== 'function') return false;
-            return \$groupChildren[0].js.some((grandchild) => {
-                $.AXUIElementCopyAttributeValue(grandchild, 'AXRole', \$attr);
-                if (\$attr[0].js !== 'AXCheckBox') return false;
-                $.AXUIElementCopyAttributeValue(grandchild, 'AXDescription', \$attr);
-                return \$attr[0].js === 'Use As Extended Display';
-            });
+function getActions(element) {
+    const \$actions = Ref();
+    const result = $.AXUIElementCopyActionNames(element, \$actions);
+    if (result !== 0) return [];
+    try {
+        return \$actions[0].js;
+    } catch (e) {
+        return [];
+    }
+}
+
+// 在直接子元素中通过 AXDescription 或 AXIdentifier 查找设备
+function findDeviceByName(elements, deviceName) {
+    for (const el of elements) {
+        const role = getAttr(el, 'AXRole');
+        if (role !== 'AXCheckBox') continue;
+
+        const desc = getAttr(el, 'AXDescription');
+        if (desc === deviceName) {
+            debug('通过 AXDescription 找到: ' + desc);
+            return el;
         }
 
-        if (\$attr[0].js !== 'AXCheckBox') return false;
-        $.AXUIElementCopyAttributeValue(child, 'AXDescription', \$attr);
-        return \$attr[0].js === 'Use As Extended Display';
-    });
+        const ident = getAttr(el, 'AXIdentifier');
+        if (ident === 'screen-mirroring-device-' + deviceName) {
+            debug('通过 AXIdentifier 找到: ' + ident);
+            return el;
+        }
+
+        const title = getAttr(el, 'AXTitle');
+        if (title === deviceName) {
+            debug('通过 AXTitle 找到: ' + title);
+            return el;
+        }
+    }
+    return null;
 }
 
-function findDeviceToggle(\$children, \$attr, deviceName) {
-    // 直接在子元素中查找
-    let toggle = \$children[0].js.find((child) => {
-        $.AXUIElementCopyAttributeValue(child, 'AXRole', \$attr);
-        if (\$attr[0].js !== 'AXCheckBox') return false;
-        $.AXUIElementCopyAttributeValue(child, 'AXDescription', \$attr);
-        return \$attr[0].js === deviceName;
-    });
+// 深度搜索：递归查找嵌套在 AXGroup 中的设备
+function deepFindDevice(elements, deviceName, maxDepth) {
+    if (maxDepth <= 0) return null;
 
-    if (toggle) return toggle;
+    for (const el of elements) {
+        const role = getAttr(el, 'AXRole');
 
-    // 如果没找到，尝试在 AXGroup 子元素中查找 (macOS 15.3+)
-    for (const child of \$children[0].js) {
-        $.AXUIElementCopyAttributeValue(child, 'AXRole', \$attr);
-        if (\$attr[0].js === 'AXGroup') {
-            const \$groupChildren = Ref();
-            $.AXUIElementCopyAttributeValue(child, 'AXChildren', \$groupChildren);
-            if (typeof \$groupChildren[0] !== 'function') continue;
-            toggle = \$groupChildren[0].js.find((grandchild) => {
-                $.AXUIElementCopyAttributeValue(grandchild, 'AXRole', \$attr);
-                if (\$attr[0].js !== 'AXCheckBox') return false;
-                $.AXUIElementCopyAttributeValue(grandchild, 'AXDescription', \$attr);
-                return \$attr[0].js === deviceName;
-            });
-            if (toggle) return toggle;
+        if (role === 'AXCheckBox') {
+            const desc = getAttr(el, 'AXDescription');
+            const ident = getAttr(el, 'AXIdentifier');
+            const title = getAttr(el, 'AXTitle');
+
+            if (desc === deviceName ||
+                title === deviceName ||
+                ident === 'screen-mirroring-device-' + deviceName) {
+                return el;
+            }
+        }
+
+        // 递归进入 AXGroup 和 AXScrollArea
+        if (role === 'AXGroup' || role === 'AXScrollArea' || role === 'AXList') {
+            const children = getAttr(el, 'AXChildren');
+            if (children && children.length > 0) {
+                const found = deepFindDevice(children, deviceName, maxDepth - 1);
+                if (found) return found;
+            }
+        }
+    }
+    return null;
+}
+
+// 查找返回按钮 (AXDisclosureTriangle 或带有 back 相关属性的按钮)
+function findBackButton(elements) {
+    for (const el of elements) {
+        const role = getAttr(el, 'AXRole');
+
+        if (role === 'AXDisclosureTriangle') {
+            debug('找到返回按钮: AXDisclosureTriangle');
+            return el;
+        }
+
+        if (role === 'AXButton') {
+            const desc = getAttr(el, 'AXDescription');
+            const ident = getAttr(el, 'AXIdentifier');
+            if (desc && (desc.toLowerCase().includes('back') || desc.includes('返回'))) {
+                debug('找到返回按钮 (AXButton): ' + desc);
+                return el;
+            }
+            if (ident && ident.toLowerCase().includes('back')) {
+                debug('找到返回按钮 (AXButton by id): ' + ident);
+                return el;
+            }
         }
     }
 
-    // 最后尝试通过 AXIdentifier 查找 (旧版 macOS)
-    toggle = \$children[0].js.find((child) => {
-        $.AXUIElementCopyAttributeValue(child, 'AXRole', \$attr);
-        if (\$attr[0].js !== 'AXCheckBox') return false;
-        $.AXUIElementCopyAttributeValue(child, 'AXIdentifier', \$attr);
-        return \$attr[0].js === 'screen-mirroring-device-' + deviceName;
-    });
+    // 深层查找
+    for (const el of elements) {
+        const role = getAttr(el, 'AXRole');
+        if (role === 'AXGroup') {
+            const children = getAttr(el, 'AXChildren');
+            if (children && children.length > 0) {
+                const found = findBackButton(children);
+                if (found) return found;
+            }
+        }
+    }
 
-    return toggle || null;
+    return null;
 }
-EOF
+
+// 通过任何属性查找可点击的设备元素
+function findDeviceByAnyAttribute(elements, deviceName) {
+    for (const el of elements) {
+        const role = getAttr(el, 'AXRole');
+        const desc = getAttr(el, 'AXDescription');
+        const title = getAttr(el, 'AXTitle');
+        const value = getAttr(el, 'AXValue');
+        const ident = getAttr(el, 'AXIdentifier');
+
+        const matchesName = [desc, title, value, ident].some(
+            (v) => v && (v === deviceName || (typeof v === 'string' && v.includes(deviceName)))
+        );
+
+        if (matchesName) {
+            const actions = getActions(el);
+            if (actions.length > 0) {
+                debug('策略4找到可点击元素: role=' + role + ' desc=' + desc + ' title=' + title);
+                return el;
+            }
+        }
+
+        // 递归
+        if (role === 'AXGroup' || role === 'AXScrollArea' || role === 'AXList') {
+            const children = getAttr(el, 'AXChildren');
+            if (children && children.length > 0) {
+                const found = findDeviceByAnyAttribute(children, deviceName);
+                if (found) return found;
+            }
+        }
+    }
+    return null;
+}
+
+// 调试：打印 UI 元素树
+function dumpElements(elements, indent) {
+    const prefix = '  '.repeat(indent);
+    for (let i = 0; i < elements.length; i++) {
+        const el = elements[i];
+        const role = getAttr(el, 'AXRole') || '?';
+        const desc = getAttr(el, 'AXDescription') || '';
+        const title = getAttr(el, 'AXTitle') || '';
+        const ident = getAttr(el, 'AXIdentifier') || '';
+        const value = getAttr(el, 'AXValue');
+        const actions = getActions(el);
+
+        let line = prefix + '[' + i + '] ' + role;
+        if (desc) line += '  desc="' + desc + '"';
+        if (title) line += '  title="' + title + '"';
+        if (ident) line += '  id="' + ident + '"';
+        if (value !== null && value !== undefined) line += '  value=' + value;
+        if (actions.length > 0) line += '  actions=[' + actions.join(', ') + ']';
+
+        log(line);
+
+        if (role === 'AXGroup' || role === 'AXScrollArea' || role === 'AXList') {
+            const children = getAttr(el, 'AXChildren');
+            if (children && children.length > 0) {
+                dumpElements(children, indent + 1);
+            }
+        }
+    }
+}
+ENDSCRIPT
 
 EXIT_CODE=$?
 if [ $EXIT_CODE -ne 0 ]; then
@@ -268,4 +479,5 @@ if [ $EXIT_CODE -ne 0 ]; then
     echo "     确保 Terminal.app (或你使用的终端) 已被授权"
     echo "  2. 确认 iPad 名称正确: 当前设置为 \"$DEVICE_NAME\""
     echo "  3. 确认 iPad 在附近且已开启"
+    echo "  4. 运行 ./sidecar.sh debug 查看详细 UI 信息"
 fi
