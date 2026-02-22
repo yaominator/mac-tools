@@ -1,4 +1,8 @@
 #!/bin/bash
+# @raycast.schemaVersion 1
+# @raycast.title connect-ipad 
+# @raycast.mode silent  # 或 inline/fullOutput，根据输出需求
+# @raycast.icon 🔧  # 可选图标
 # =============================================================================
 # sidecar.sh - 通过 Control Center 自动连接/断开 iPad Sidecar
 # =============================================================================

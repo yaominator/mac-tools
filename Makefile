@@ -1,7 +1,7 @@
-.PHONY: ci 
+.PHONY: update 
 
 
-ci:
+update:
 	git add .
 	git commit -m "ci: update"
 	git push
