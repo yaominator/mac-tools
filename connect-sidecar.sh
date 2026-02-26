@@ -1,26 +1,19 @@
 #!/bin/bash
+
+# Required parameters:
 # @raycast.schemaVersion 1
-# @raycast.title connect-ipad 
-# @raycast.mode silent  # 或 inline/fullOutput，根据输出需求
-# @raycast.icon 🔧  # 可选图标
-# =============================================================================
-# sidecar.sh - 通过 Control Center 自动连接/断开 iPad Sidecar
-# =============================================================================
-#
-# 使用方法:
-#   chmod +x sidecar.sh
-#   ./sidecar.sh                    # 使用默认设备名连接/断开
-#   ./sidecar.sh "My iPad"          # 指定 iPad 名称
-#   ./sidecar.sh debug              # 调试模式 - 打印屏幕镜像面板的 UI 元素
-#   ./sidecar.sh debug "My iPad"    # 调试模式 + 指定设备名
-#
-# 前提条件:
-#   1. 在 系统设置 > 隐私与安全性 > 辅助功能 中授权 Terminal.app
-#   2. iPad 与 Mac 登录同一 Apple ID，且在附近/同一 WiFi
-#   3. 将下方 DEFAULT_DEVICE_NAME 改为你 iPad 的名称
-#
-# 兼容性: macOS Sequoia (15.2+) / Tahoe (中英文系统均支持)
-# =============================================================================
+# @raycast.title Toggle iPad Sidecar
+# @raycast.mode compact
+
+# Optional parameters:
+# @raycast.icon 🖥️
+# @raycast.description Connect or disconnect iPad Sidecar via Control Center
+# @raycast.packageName Display
+
+# Prerequisite: Grant Raycast accessibility permission in
+# System Settings > Privacy & Security > Accessibility
+
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 DEFAULT_DEVICE_NAME="13太保"  # <-- 改成你的 iPad 名称
 
@@ -475,13 +468,5 @@ ENDSCRIPT
 
 EXIT_CODE=$?
 if [ $EXIT_CODE -ne 0 ]; then
-    echo ""
-    echo "脚本执行失败 (退出码: $EXIT_CODE)"
-    echo ""
-    echo "常见问题排查:"
-    echo "  1. 打开 系统设置 > 隐私与安全性 > 辅助功能"
-    echo "     确保 Terminal.app (或你使用的终端) 已被授权"
-    echo "  2. 确认 iPad 名称正确: 当前设置为 \"$DEVICE_NAME\""
-    echo "  3. 确认 iPad 在附近且已开启"
-    echo "  4. 运行 ./sidecar.sh debug 查看详细 UI 信息"
+    echo "Failed (exit $EXIT_CODE) - Check: 1) Raycast has Accessibility permission 2) iPad name '$DEVICE_NAME' is correct 3) iPad is nearby"
 fi
