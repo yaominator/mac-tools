@@ -36,6 +36,9 @@ if [ "$DEBUG_MODE" = "true" ]; then
 fi
 echo "正在切换 Sidecar 连接: $DEVICE_NAME ..."
 
+# Escape single quotes for JS string literal
+DEVICE_NAME_JS=$(printf '%s' "$DEVICE_NAME" | sed "s/'/\\\\'/g")
+
 osascript -l JavaScript <<ENDSCRIPT
 ObjC.import('Cocoa');
 ObjC.bindFunction('AXUIElementPerformAction', ['int', ['id', 'id']]);
@@ -55,7 +58,7 @@ function debug(msg) {
 }
 
 function run(_) {
-    const TARGET_DEVICE_NAME = '$DEVICE_NAME';
+    const TARGET_DEVICE_NAME = '$DEVICE_NAME_JS';
     const \$attr = Ref();
     const \$windows = Ref();
     const \$children = Ref();
