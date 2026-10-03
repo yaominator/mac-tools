@@ -46,6 +46,7 @@ ObjC.bindFunction('AXUIElementCreateApplication', ['id', ['unsigned int']]);
 ObjC.bindFunction('AXUIElementCopyAttributeValue', ['int', ['id', 'id', 'id*']]);
 ObjC.bindFunction('AXUIElementCopyAttributeNames', ['int', ['id', 'id*']]);
 ObjC.bindFunction('AXUIElementCopyActionNames', ['int', ['id', 'id*']]);
+ObjC.bindFunction('AXIsProcessTrusted', ['bool', []]);
 
 const DEBUG = $DEBUG_MODE;
 
@@ -59,6 +60,14 @@ function debug(msg) {
 
 function run(_) {
     const TARGET_DEVICE_NAME = '$DEVICE_NAME_JS';
+
+    // macOS 升级后辅助功能授权经常失效，此时所有 AX 调用都返回 -25211
+    if (!$.AXIsProcessTrusted()) {
+        log('错误: 没有辅助功能权限 (macOS 升级后常会失效)');
+        log('请到 系统设置 > 隐私与安全性 > 辅助功能，删除 Raycast 后重新添加并打开开关');
+        return 1;
+    }
+
     const \$attr = Ref();
     const \$windows = Ref();
     const \$children = Ref();
@@ -70,13 +79,9 @@ function run(_) {
     const app = $.AXUIElementCreateApplication(pid);
 
     // 获取 Control Center 菜单栏项
-    $.AXUIElementCopyAttributeValue(app, 'AXChildren', \$children);
-    $.AXUIElementCopyAttributeValue(\$children[0].js[0], 'AXChildren', \$children);
-
-    const ccExtra = \$children[0].js.find((child) => {
-        $.AXUIElementCopyAttributeValue(child, 'AXIdentifier', \$attr);
-        return \$attr[0].js == 'com.apple.menuextra.controlcenter';
-    });
+    // macOS 27+: 菜单栏图标由 com.apple.MenuBarAgent 托管（外面多包一层 AXHostingView 分组）
+    // 更早版本: 在 com.apple.controlcenter 自己的 AXExtrasMenuBar 里
+    const ccExtra = findMenuExtra('com.apple.MenuBarAgent') || findMenuExtra('com.apple.controlcenter');
 
     if (!ccExtra) {
         log('错误: 找不到 Control Center 菜单栏项');
@@ -271,6 +276,26 @@ function waitFor(condition, timeoutMs) {
         if (new Date().getTime() > timeout) return false;
         delay(0.1);
     }
+}
+
+// 在指定进程的菜单栏中查找 Control Center 图标
+function findMenuExtra(bundleId) {
+    const apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier(bundleId);
+    if (apps.count === 0) return null;
+    const bar = getAttr($.AXUIElementCreateApplication(apps.firstObject.processIdentifier), 'AXExtrasMenuBar');
+    if (!bar) return null;
+
+    function search(elements, depth) {
+        for (const el of elements) {
+            if (getAttr(el, 'AXIdentifier') === 'com.apple.menuextra.controlcenter') return el;
+            if (depth > 0) {
+                const found = search(getAttr(el, 'AXChildren') || [], depth - 1);
+                if (found) return found;
+            }
+        }
+        return null;
+    }
+    return search(getAttr(bar, 'AXChildren') || [], 2);
 }
 
 function dismissControlCenter() {
